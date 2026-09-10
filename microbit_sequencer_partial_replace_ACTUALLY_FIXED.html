@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Micro:bit v1 3-Sound Sequencer</title>
+  <style>
+    body {
+      background: #050015;
+      color: #fff;
+      font-family: system-ui, sans-serif;
+      padding: 10px;
+    }
+    .row { margin-bottom: 12px; }
+    label { margin-right: 8px; }
+    .grid {
+      display: grid;
+      gap: 3px;
+      margin-bottom: 6px;
+    }
+    .cell {
+      width: 20px;
+      height: 20px;
+      background: #222;
+      cursor: pointer;
+      border-radius: 3px;
+    }
+    .track-label {
+      margin-bottom: 4px;
+      font-size: 12px;
+      opacity: 0.8;
+    }
+    #output {
+      background: #111;
+      padding: 8px;
+      white-space: pre;
+      font-size: 11px;
+      border-radius: 4px;
+      max-height: 260px;
+      overflow: auto;
+    }
+    button {
+      margin-right: 6px;
+      margin-top: 4px;
+    }
+
+    .transfer-status {
+      font-size: 11px;
+      opacity: 0.8;
+      margin-top: 6px;
+    }
+    .transfer-status.good { color: #6aff00; }
+    .transfer-status.bad { color: #ff7a00; }
+  </style>
+</head>
+<body>
+
+  <div class="row">
+    <label>Mode:</label>
+    <select id="mode">
+      <option value="dual">2 Tracks (64 steps)</option>
+      <option value="single">1 Track (18 × 64)</option>
+    </select>
+
+    <label>Tempo (ms per step):</label>
+    <input id="tempo" type="number" value="200" min="50" max="1000" style="width:70px">
+
+    <label>Scale:</label>
+    <select id="scale">
+      <option value="simple">Simple</option>
+      <option value="cmajor">C major</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <label>Current sound:</label>
+    <select id="currentInst">
+      <option value="0">Humm (melody)</option>
+      <option value="1">Bumph (bass)</option>
+      <option value="2">Tsk (drum)</option>
+    </select>
+    <span style="font-size:11px;opacity:0.8;">Click a cell to place/remove that sound.</span>
+  </div>
+
+  <div class="row" style="font-size:12px;opacity:0.9;">
+    <span style="color:#ff00d8;">■ Humm</span>&nbsp;&nbsp;
+    <span style="color:#ff7a00;">■ Bumph</span>&nbsp;&nbsp;
+    <span style="color:#d8d8d8;">■ Tsk</span>
+  </div>
+
+  <div class="row">
+    <div class="track-label" id="track1-label">Track 1 (A)</div>
+    <div class="grid" id="grid1"></div>
+  </div>
+
+  <div class="row" id="track2-row">
+    <div class="track-label">Track 2 (B)</div>
+    <div class="grid" id="grid2"></div>
+  </div>
+
+  <div class="row">
+    <button id="export">Export micro:bit JS</button>
+    <button id="clear">Clear</button>
+    <button onclick="playTrackState(1)">Play Track 1 (Browser)</button>
+    <button id="playTrack2" onclick="playTrackState(2)">Play Track 2 (Browser)</button>
+    <button id="exportMidi">Export MIDI</button>
+  </div>
+
+  <div class="row">
+    <button id="mbConnect">Connect micro:bit</button>
+    <button id="mbImport1" disabled>Import micro:bit → Track 1</button>
+    <button id="mbImport2" disabled>Import micro:bit → Track 2</button>
+    <div id="mbStatus" class="transfer-status">Not connected. Connect, then press A+B on the micro:bit.</div>
+  </div>
+
+  <pre id="output"></pre>
+
+  <script>
+    const grid1 = document.getElementById('grid1');
+    const grid2 = document.getElementById('grid2');
+    const track2Row = document.getElementById('track2-row');
+    const modeEl = document.getElementById('mode');
+    const tempoEl = document.getElementById('tempo');
+    const scaleEl = document.getElementById('scale');
+    const currentInstEl = document.getElementById('currentInst');
+    const outputEl = document.getElementById('output');
+    const mbConnectEl = document.getElementById('mbConnect');
+    const mbImport1El = document.getElementById('mbImport1');
+    const mbImport2El = document.getElementById('mbImport2');
+    const mbStatusEl = document.getElementById('mbStatus');
+    const playTrack2El = document.getElementById('playTrack2');
+    const exportMidiEl = document.getElementById('exportMidi');
+
+    let cols = 64;
+    let rows = 9;
+
+    // state: null = off, otherwise instrument code 0/1/2
+    let track1State = [];
+    let track2State = [];
+
+    const instColors = {
+      0: '#ff00d8', // humm
+      1: '#ff7a00', // bumph
+      2: '#d8d8d8'  // tsk
+    };
+
+    function getFreqs() {
+      const expanded = modeEl.value === 'single';
+
+      if (scaleEl.value === 'cmajor') {
+        if (expanded) {
+          // C3 through F5: 18 notes for the 18-row track.
+          return [698, 659, 587, 523, 494, 440, 392, 349, 330, 294, 262, 247, 220, 196, 175, 165, 147, 131];
+        }
+        // Original 9-note range for dual-track mode.
+        return [587, 523, 494, 440, 392, 349, 330, 294, 262];
+      } else {
+        if (expanded) {
+          return [450, 430, 410, 390, 370, 350, 330, 310, 290, 270, 250, 230, 210, 190, 170, 150, 130, 110];
+        }
+        return [540, 500, 460, 420, 380, 340, 300, 260, 220];
+      }
+    }
+
+    function initState() {
+      track1State = Array(rows).fill(0).map(() => Array(cols).fill(null));
+      track2State = Array(rows).fill(0).map(() => Array(cols).fill(null));
+    }
+
+    function buildGrids() {
+      grid1.innerHTML = '';
+      grid2.innerHTML = '';
+
+      grid1.style.gridTemplateColumns = `repeat(${cols}, 20px)`;
+      grid2.style.gridTemplateColumns = `repeat(${cols}, 20px)`;
+
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const cell = document.createElement('div');
+          cell.className = 'cell';
+          cell.dataset.row = r;
+          cell.dataset.col = c;
+          cell.dataset.track = '1';
+          cell.onclick = () => toggleCell(1, r, c, cell);
+          grid1.appendChild(cell);
+        }
+      }
+
+      if (modeEl.value === 'dual') {
+        track2Row.style.display = 'block';
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            const cell = document.createElement('div');
+            cell.className = 'cell';
+            cell.dataset.row = r;
+            cell.dataset.col = c;
+            cell.dataset.track = '2';
+            cell.onclick = () => toggleCell(2, r, c, cell);
+            grid2.appendChild(cell);
+          }
+        }
+      } else {
+        track2Row.style.display = 'none';
+      }
+    }
+
+    function applyCellColor(cell, inst) {
+      if (inst === null || inst === undefined) {
+        cell.style.backgroundColor = '#222';
+      } else {
+        cell.style.backgroundColor = instColors[inst] || '#ff00d8';
+      }
+    }
+
+    function toggleCell(track, r, c, cell) {
+      const currentInst = parseInt(currentInstEl.value, 10);
+      if (track === 1) {
+        if (track1State[r][c] !== null) {
+          track1State[r][c] = null;
+          applyCellColor(cell, null);
+        } else {
+          track1State[r][c] = currentInst;
+          applyCellColor(cell, currentInst);
+        }
+      } else {
+        if (track2State[r][c] !== null) {
+          track2State[r][c] = null;
+          applyCellColor(cell, null);
+        } else {
+          track2State[r][c] = currentInst;
+          applyCellColor(cell, currentInst);
+        }
+      }
+    }
+
+    function rebuild() {
+      cols = 64;
+      rows = modeEl.value === 'dual' ? 9 : 18;
+      document.getElementById('track1-label').textContent =
+        modeEl.value === 'dual' ? 'Track 1 (A) — 9 × 64' : 'Track 1 (A) — 18 × 64';
+      initState();
+      buildGrids();
+      outputEl.textContent = '';
+      window.browserTrack1 = null;
+      window.browserTrack2 = null;
+      playTrack2El.disabled = modeEl.value !== 'dual';
+      mbImport2El.disabled = modeEl.value !== 'dual' || !microbitSongReady;
+    }
+
+    modeEl.onchange = rebuild;
+    scaleEl.onchange = () => { outputEl.textContent = ''; };
+    document.getElementById('clear').onclick = rebuild;
+
+    document.getElementById('export').onclick = () => {
+      const freqs = getFreqs();
+      const stepDur = parseInt(tempoEl.value, 10) || 200;
+
+      let js = `
+function playNote(freq: number, dur: number, inst: number) {
+    if (freq <= 0) {
+        basic.pause(dur);
+        return;
+    }
+    if (inst == 0) {
+        // Humm: normal melody tone
+        music.playTone(freq, dur);
+    } else if (inst == 1) {
+        // Bumph: quick low thump made from two short descending tones
+        music.playTone(Math.max(40, freq / 2), Math.max(20, dur / 5));
+        music.playTone(Math.max(30, freq / 3), Math.max(20, dur / 6));
+        basic.pause(Math.max(0, dur - (Math.max(20, dur / 5) + Math.max(20, dur / 6))));
+    } else if (inst == 2) {
+        // Tsk: short, high click-like tone
+        music.playTone(Math.min(4000, freq * 6), Math.max(10, dur / 12));
+        basic.pause(Math.max(0, dur - Math.max(10, dur / 12)));
+    }
+}
+`;
+
+      // Track 1 arrays
+      js += 'let t1Freq = [\n';
+      for (let c = 0; c < cols; c++) {
+        let found = false;
+        let freq = 0;
+        for (let r = 0; r < rows; r++) {
+          const instCode = track1State[r][c];
+          if (instCode !== null) {
+            freq = freqs[r];
+            found = true;
+            break;
+          }
+        }
+        js += `  ${found ? freq : 0},\n`;
+      }
+      js += '];\n\n';
+
+      js += 'let t1Dur = [\n';
+      for (let c = 0; c < cols; c++) {
+        js += `  ${stepDur},\n`;
+      }
+      js += '];\n\n';
+
+      js += 'let t1Inst = [\n';
+      for (let c = 0; c < cols; c++) {
+        let instCode = 0;
+        let found = false;
+        for (let r = 0; r < rows; r++) {
+          const cellInst = track1State[r][c];
+          if (cellInst !== null) {
+            instCode = cellInst;
+            found = true;
+            break;
+          }
+        }
+        js += `  ${found ? instCode : 0},\n`;
+      }
+      js += '];\n\n';
+
+      if (modeEl.value === 'dual') {
+        js += 'let t2Freq = [\n';
+        for (let c = 0; c < cols; c++) {
+          let found = false;
+          let freq = 0;
+          for (let r = 0; r < rows; r++) {
+            const instCode = track2State[r][c];
+            if (instCode !== null) {
+              freq = freqs[r];
+              found = true;
+              break;
+            }
+          }
+          js += `  ${found ? freq : 0},\n`;
+        }
+        js += '];\n\n';
+
+        js += 'let t2Dur = [\n';
+        for (let c = 0; c < cols; c++) {
+          js += `  ${stepDur},\n`;
+        }
+        js += '];\n\n';
+
+        js += 'let t2Inst = [\n';
+        for (let c = 0; c < cols; c++) {
+          let instCode = 0;
+          let found = false;
+          for (let r = 0; r < rows; r++) {
+            const cellInst = track2State[r][c];
+            if (cellInst !== null) {
+              instCode = cellInst;
+              found = true;
+              break;
+            }
+          }
+          js += `  ${found ? instCode : 0},\n`;
+        }
+        js += '];\n\n';
+
+        js += `
+input.onButtonPressed(Button.A, function () {
+    for (let i = 0; i < t1Freq.length; i++) {
+        playNote(t1Freq[i], t1Dur[i], t1Inst[i]);
+    }
+})
+
+input.onButtonPressed(Button.B, function () {
+    for (let i = 0; i < t2Freq.length; i++) {
+        playNote(t2Freq[i], t2Dur[i], t2Inst[i]);
+    }
+})
+`;
+      } else {
+        js += `
+input.onButtonPressed(Button.A, function () {
+    for (let i = 0; i < t1Freq.length; i++) {
+        playNote(t1Freq[i], t1Dur[i], t1Inst[i]);
+    }
+})
+`;
+      }
+
+      // Build browser tracks from same data
+      const browserTrack1 = [];
+      for (let c = 0; c < cols; c++) {
+        let found = false;
+        let freq = 0;
+        let instCode = 0;
+        for (let r = 0; r < rows; r++) {
+          const cellInst = track1State[r][c];
+          if (cellInst !== null) {
+            freq = freqs[r];
+            instCode = cellInst;
+            found = true;
+            break;
+          }
+        }
+        browserTrack1.push({
+          freq: found ? freq : 0,
+          duration: stepDur,
+          inst: instCode
+        });
+      }
+
+      let browserTrack2 = null;
+      if (modeEl.value === 'dual') {
+        browserTrack2 = [];
+        for (let c = 0; c < cols; c++) {
+          let found = false;
+          let freq = 0;
+          let instCode = 0;
+          for (let r = 0; r < rows; r++) {
+            const cellInst = track2State[r][c];
+            if (cellInst !== null) {
+              freq = freqs[r];
+              instCode = cellInst;
+              found = true;
+              break;
+            }
+          }
+          browserTrack2.push({
+            freq: found ? freq : 0,
+            duration: stepDur,
+            inst: instCode
+          });
+        }
+      }
+
+      window.browserTrack1 = browserTrack1;
+      window.browserTrack2 = browserTrack2;
+
+      outputEl.textContent = js.trim();
+    };
+
+    // --- Browser Audio Preview (WebAudio) ---
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    function playToneBrowser(freq, dur, instCode) {
+      if (freq <= 0) return new Promise(res => setTimeout(res, dur));
+
+      let osc = audioCtx.createOscillator();
+      let gain = audioCtx.createGain();
+      osc.type = "square";
+      osc.frequency.value = freq;
+
+      if (instCode === 1) {
+        osc.frequency.value = Math.max(40, freq / 2);
+        dur = Math.max(40, dur / 3);
+      } else if (instCode === 2) {
+        osc.frequency.value = Math.min(4000, freq * 6);
+        dur = Math.max(12, dur / 12);
+      }
+
+      gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + dur / 1000);
+      return new Promise(res => { osc.onended = res; });
+    }
+
+    async function playTrackState(trackNumber) {
+      if (trackNumber === 2 && modeEl.value !== 'dual') return;
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+      const state = trackNumber === 1 ? track1State : track2State;
+      const freqs = getFreqs();
+      const stepDur = parseInt(tempoEl.value, 10) || 200;
+
+      // Match the micro:bit player: every note in a column is played
+      // sequentially for one full step each. An empty column is one step.
+      for (let c = 0; c < cols; c++) {
+        let played = false;
+        for (let r = 0; r < rows; r++) {
+          const inst = state[r][c];
+          if (inst !== null && freqs[r] > 0) {
+            await playToneBrowser(freqs[r], stepDur, inst);
+            played = true;
+          }
+        }
+        if (!played) await new Promise(res => setTimeout(res, stepDur));
+      }
+    }
+
+    // --- micro:bit USB serial import ---
+    // Packet expected from the micro:bit:
+    // SONG, then ten decimal bitmasks (0..31), then END.
+    const microbitFreqs = [523, 440, 392, 330, 262];
+    let microbitSong = Array(10).fill(0);
+    let microbitSongReady = false;
+    let microbitPort = null;
+    let microbitReader = null;
+    let receivingMicrobitSong = false;
+    let incomingMicrobitSong = [];
+
+    function setMicrobitStatus(text, kind = '') {
+      mbStatusEl.textContent = text;
+      mbStatusEl.className = 'transfer-status' + (kind ? ' ' + kind : '');
+    }
+
+    function acceptMicrobitLine(line) {
+      line = line.trim();
+      if (!line) return;
+
+      if (line === 'SONG') {
+        receivingMicrobitSong = true;
+        incomingMicrobitSong = [];
+        setMicrobitStatus('Receiving song…');
+        return;
+      }
+
+      if (line === 'END' && receivingMicrobitSong) {
+        receivingMicrobitSong = false;
+
+        if (incomingMicrobitSong.length > 0) {
+          // Take what arrived even if a serial packet lost a line.
+          // Missing columns are padded with empty columns at the end.
+          microbitSong = incomingMicrobitSong.slice(0, 10);
+          while (microbitSong.length < 10) microbitSong.push(0);
+
+          microbitSongReady = true;
+          mbImport1El.disabled = false;
+          mbImport2El.disabled = modeEl.value !== 'dual';
+
+          if (incomingMicrobitSong.length === 10) {
+            setMicrobitStatus('Song received: all 10 columns. Choose a track.', 'good');
+          } else {
+            setMicrobitStatus(
+              'Song received: ' + incomingMicrobitSong.length +
+              '/10 columns. Taking it anyway; missing columns padded empty.',
+              'bad'
+            );
+          }
+        } else {
+          setMicrobitStatus('No song columns arrived.', 'bad');
+        }
+        return;
+      }
+
+      if (receivingMicrobitSong) {
+        const value = Number(line);
+        if (Number.isInteger(value) && value >= 0 && value <= 31 && incomingMicrobitSong.length < 10) {
+          incomingMicrobitSong.push(value);
+        }
+      }
+    }
+
+    async function connectMicrobit() {
+      if (!('serial' in navigator)) {
+        setMicrobitStatus('Web Serial is unavailable here. Use Chrome, Edge, or Opera on HTTPS/localhost.', 'bad');
+        return;
+      }
+
+      try {
+        microbitPort = await navigator.serial.requestPort();
+        await microbitPort.open({ baudRate: 115200 });
+        mbConnectEl.disabled = true;
+        setMicrobitStatus('Connected. Press A+B on the micro:bit.');
+
+        const decoder = new TextDecoderStream();
+        const readableClosed = microbitPort.readable.pipeTo(decoder.writable);
+        microbitReader = decoder.readable.getReader();
+        let buffer = '';
+
+        try {
+          while (true) {
+            const { value, done } = await microbitReader.read();
+            if (done) break;
+            buffer += value;
+            const lines = buffer.split(/\r?\n/);
+            buffer = lines.pop();
+            for (const line of lines) acceptMicrobitLine(line);
+          }
+        } finally {
+          microbitReader.releaseLock();
+          await readableClosed.catch(() => {});
+        }
+      } catch (error) {
+        mbConnectEl.disabled = false;
+        setMicrobitStatus('Serial error: ' + error.message, 'bad');
+      }
+    }
+
+    function nearestRowForFrequency(freq) {
+      const freqs = getFreqs();
+      let bestRow = 0;
+      let bestDistance = Infinity;
+      for (let r = 0; r < freqs.length; r++) {
+        const distance = Math.abs(freqs[r] - freq);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestRow = r;
+        }
+      }
+      return bestRow;
+    }
+
+    function repaintTrack(trackNumber) {
+      const grid = trackNumber === 1 ? grid1 : grid2;
+      const state = trackNumber === 1 ? track1State : track2State;
+      for (const cell of grid.children) {
+        const r = Number(cell.dataset.row);
+        const c = Number(cell.dataset.col);
+        applyCellColor(cell, state[r][c]);
+      }
+    }
+
+    function importMicrobitToTrack(trackNumber) {
+      if (!microbitSongReady) return;
+      if (trackNumber === 2 && modeEl.value !== 'dual') return;
+
+      const state = trackNumber === 1 ? track1State : track2State;
+
+      // Keep the rest of the track intact.
+      // Only the specific micro:bit 5-pitch × 10-step area is cleared below.
+
+      // Use the normal C-major editor scale. It already contains every
+      // micro:bit pitch exactly: 523, 440, 392, 330 and 262 Hz.
+      scaleEl.value = 'cmajor';
+      tempoEl.value = '250';
+
+      const editorFreqs = getFreqs();
+
+      // Only replace the exact 5-pitch × 10-step area used by the micro:bit.
+      // Everything outside that area stays untouched.
+      const microbitRows = microbitFreqs
+        .map(freq => editorFreqs.indexOf(freq))
+        .filter(row => row >= 0);
+
+      for (const row of microbitRows) {
+        for (let c = 0; c < 10; c++) {
+          state[row][c] = null;
+        }
+      }
+
+      // Now place the received micro:bit notes into that cleared area.
+      for (let c = 0; c < 10; c++) {
+        const mask = microbitSong[c];
+
+        for (let bitRow = 0; bitRow < 5; bitRow++) {
+          if ((mask & (1 << bitRow)) !== 0) {
+            const targetFreq = microbitFreqs[bitRow];
+            const editorRow = editorFreqs.indexOf(targetFreq);
+
+            if (editorRow >= 0) {
+              state[editorRow][c] = 0; // Humm / square-wave melody
+            }
+          }
+        }
+      }
+
+      repaintTrack(trackNumber);
+      setMicrobitStatus(
+        'Imported into Track ' + trackNumber +
+        '. Only the micro:bit 5×10 area was replaced; everything else was kept.',
+        'good'
+      );
+    }
+
+    mbConnectEl.addEventListener('click', connectMicrobit);
+    mbImport1El.addEventListener('click', () => importMicrobitToTrack(1));
+    mbImport2El.addEventListener('click', () => importMicrobitToTrack(2));
+
+    // --- Standard MIDI file export ---
+    function writeVarLen(value) {
+      let buffer = value & 0x7F;
+      const out = [];
+      while ((value >>= 7)) {
+        buffer <<= 8;
+        buffer |= ((value & 0x7F) | 0x80);
+      }
+      while (true) {
+        out.push(buffer & 0xFF);
+        if (buffer & 0x80) buffer >>= 8;
+        else break;
+      }
+      return out;
+    }
+
+    function frequencyToMidi(freq) {
+      return Math.max(0, Math.min(127, Math.round(69 + 12 * Math.log2(freq / 440))));
+    }
+
+    function effectiveFrequency(freq, inst) {
+      if (inst === 1) return Math.max(40, freq / 2);
+      if (inst === 2) return Math.min(4000, freq * 6);
+      return freq;
+    }
+
+    function makeMidiTrack(state, channel) {
+      const ppq = 480;
+      const freqs = getFreqs();
+      const events = [];
+
+      for (let c = 0; c < cols; c++) {
+        const startTick = c * ppq;
+        for (let r = 0; r < rows; r++) {
+          const inst = state[r][c];
+          if (inst === null) continue;
+          const freq = effectiveFrequency(freqs[r], inst);
+          const note = frequencyToMidi(freq);
+          const length = inst === 2 ? Math.max(30, Math.round(ppq / 12)) :
+                         inst === 1 ? Math.max(60, Math.round(ppq / 3)) : ppq;
+          events.push({ tick: startTick, order: 1, bytes: [0x90 | channel, note, 100] });
+          events.push({ tick: startTick + length, order: 0, bytes: [0x80 | channel, note, 0] });
+        }
+      }
+
+      events.sort((a, b) => a.tick - b.tick || a.order - b.order);
+      const data = [];
+      let lastTick = 0;
+      for (const event of events) {
+        data.push(...writeVarLen(event.tick - lastTick), ...event.bytes);
+        lastTick = event.tick;
+      }
+      data.push(0x00, 0xFF, 0x2F, 0x00);
+      return data;
+    }
+
+    function pushU16(arr, value) {
+      arr.push((value >> 8) & 255, value & 255);
+    }
+
+    function pushU32(arr, value) {
+      arr.push((value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255);
+    }
+
+    function addChunk(file, name, data) {
+      for (const ch of name) file.push(ch.charCodeAt(0));
+      pushU32(file, data.length);
+      file.push(...data);
+    }
+
+    function exportMidi() {
+      const ppq = 480;
+      const stepMs = Math.max(50, parseInt(tempoEl.value, 10) || 200);
+      const microsecondsPerQuarter = Math.min(0xFFFFFF, stepMs * 1000);
+
+      const tempoTrack = [
+        0x00, 0xFF, 0x51, 0x03,
+        (microsecondsPerQuarter >> 16) & 255,
+        (microsecondsPerQuarter >> 8) & 255,
+        microsecondsPerQuarter & 255,
+        0x00, 0xFF, 0x2F, 0x00
+      ];
+
+      const tracks = [tempoTrack, makeMidiTrack(track1State, 0)];
+      if (modeEl.value === 'dual') tracks.push(makeMidiTrack(track2State, 1));
+
+      const file = [];
+      file.push(0x4D, 0x54, 0x68, 0x64); // MThd
+      pushU32(file, 6);
+      pushU16(file, tracks.length > 1 ? 1 : 0);
+      pushU16(file, tracks.length);
+      pushU16(file, ppq);
+
+      for (const track of tracks) addChunk(file, 'MTrk', track);
+
+      const blob = new Blob([new Uint8Array(file)], { type: 'audio/midi' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'microbit-sequencer.mid';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    exportMidiEl.addEventListener('click', exportMidi);
+
+    rebuild();
+  </script>
+</body>
+</html>
