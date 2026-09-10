@@ -1,4 +1,5 @@
-
+I DID NOT MAKE THIS MULTIPLE AIS DID THIS SHIT IS FOR FUN ONLY BEWARE
+made this make music on micro bit for v1 , import it into web and change it and export as midi do whatever .
 > Open this page at [https://lakaszada.github.io/music-maker/](https://lakaszada.github.io/music-maker/)
 
 ## Use as Extension
